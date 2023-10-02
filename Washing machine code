@@ -1,0 +1,594 @@
+#include "mbed.h"
+
+// Switches
+DigitalIn Switch1(PC_10);
+DigitalIn Switch2(PD_2);
+DigitalIn Switch3(PC_11);
+
+// LEDs
+DigitalOut BlueLED(PC_0);
+DigitalOut RedLED(PB_0);
+DigitalOut GreenLED(PC_1);
+
+// Potentiometers
+AnalogIn Potentiometer1(PA_5);
+AnalogIn Potentiometer2(PA_6);
+
+// Force Sensitive Resistor
+AnalogIn ForceSensitiveResistor(PA_1);
+
+// Light Dependent Resistor
+AnalogIn LightDependentResistor(PC_2);
+
+// Multi-coloured LED
+PwmOut MultiColourLED_Red(PB_4);
+PwmOut MultiColourLED_Green(PB_3);
+PwmOut MultiColourLED_Blue(PB_5);
+
+//7-segment displays:
+//segment        A      B      C      D      E      F      G        
+BusOut Display(PB_11, PB_1, PB_14, PA_12, PA_11, PB_12, PB_2);
+DigitalOut Decimal_Point1(PB_15);
+
+// Buzzer
+PwmOut Buzzer(PA_15);
+
+// Temperature Sensor
+AnalogIn TemperatureSensor(PC_3);
+
+// Buffered serial communication
+BufferedSerial pc(USBTX, USBRX, 115200);
+
+// Function to print the message letter by letter
+void printMessageLetterByLetter(BufferedSerial & serial, const char *message, int delay_us) {
+    while (*message) {
+        serial.write(message, 1);
+        message++;
+        wait_us(delay_us);  // Wait for the specified delay in microseconds
+    }
+}
+
+// Function to play a tone with the buzzer
+void playBuzzerTone(PwmOut &buzzer, float frequency, float duration) {
+    buzzer.period(1.0 / frequency);
+    buzzer = 0.5; // 50% duty cycle
+    ThisThread::sleep_for(duration * 1000);
+    buzzer = 0.0; // Turn off the buzzer
+}
+
+// Function to map the potentiometer value to a temperature mode
+int getCurrentTemperatureMode(float pot_value) {
+    if (pot_value < 0.33) {
+        return 2; // Cold
+    } else if (pot_value >= 0.33 && pot_value < 0.66) {
+        return 1; // Warm
+    } else {
+        return 0; // Hot
+    }
+}
+
+// Function to print the temperature mode on the serial monitor
+void printTemperatureMode(BufferedSerial & serial, int mode, int &prev_display_state) {
+    if (mode == 2) {
+        const char cold[] = "Temperature Mode: Cold (15°C)\r\n";
+        printMessageLetterByLetter(serial, cold, 100000);
+        Display = 0b00111001; // 7-segment display to shows 'C'
+        prev_display_state  = Display; // Previous display state
+    } else if (mode == 1) {
+        const char warm[] = "Temperature Mode: Warm (30°C)\r\n";
+        printMessageLetterByLetter(serial, warm, 100000);
+        Display = 0b00111110; // 7-segment display to shows 'U' (closest thing to a 'W' shape)
+        prev_display_state  = Display; // Previous display state
+    } else {
+        const char hot[] = "Temperature Mode: Hot (60°C)\r\n";
+        printMessageLetterByLetter(serial, hot, 100000);
+        Display = 0b01110110; // 7-segment display to shows 'H'
+        prev_display_state  = Display; // Previous display state
+    }
+}
+
+// Function to play the sound of a washing machine operating
+void playMelody(PwmOut &buzzer) {
+    float note_duration = 0.1; // Duration of each note
+
+    // Frequencies for the notes C4, D4, E4, F4, G4, A4, B4, and C5
+    float notes[] = {261.63, 293.66, 329.63, 349.23, 392.00, 440.00, 493.88, 523.25};
+
+    // Play the melody
+    for (int i = 0; i < 8; i++) {
+        playBuzzerTone(buzzer, notes[i], note_duration);
+    }
+}
+
+// Function to play a melody when the washing cycle stops
+void playStopMelody(PwmOut &buzzer) {
+    // Play a melody here. For example, a descending tone:
+    for (float frequency = 880; frequency >= 440; frequency -= 50) {
+        buzzer.period(1.0 / frequency);
+        buzzer = 0.5; // 50% duty cycle
+        ThisThread::sleep_for(100);
+    }
+    buzzer = 0.0; // Turn off the buzzer
+}
+
+void updateSegmentDisplay(BusOut &display, bool washing_cycle_on, int &display_state) {
+    if (!washing_cycle_on) {
+        if (display_state != 0) {
+            display = 0x3F; // Display a constant circle
+            display_state = 0;
+        }
+    } else {
+        if (display_state != 1) {
+            display_state = 1;
+        }
+    }
+}
+
+// Function to map the second potentiometer value to a spin mode
+int getCurrentSpinMode(float pot_value) {
+    if (pot_value < 0.2) {
+        return 0; // Cotton (1400 RPM)
+    } else if (pot_value >= 0.2 && pot_value < 0.4) {
+        return 1; // Denim (900 rpm)
+    } else if (pot_value >= 0.4 && pot_value < 0.6) {
+        return 2; // Wool (800 rpm)
+    } else if (pot_value >= 0.6 && pot_value < 0.8) {
+        return 3; // Delicates (600 rpm)
+    } else {
+        return 4; // Silk (400 rpm)
+    }
+}
+
+// Function to print the spin mode on the serial monitor
+void printSpinMode(BufferedSerial & serial, int mode) {
+    if (mode == 0) {
+        const char cotton[] = "Spin Mode: Cotton (1400 RPM)\r\n";
+        printMessageLetterByLetter(serial, cotton, 100000);
+    } else if (mode == 1) {
+        const char denim[] = "Spin Mode: Denim (900 RPM)\r\n";
+        printMessageLetterByLetter(serial, denim, 100000);
+    } else if (mode == 2) {
+        const char wool[] = "Spin Mode: Wool (800 RPM)\r\n";
+        printMessageLetterByLetter(serial, wool, 100000);
+    } else if (mode == 3) {
+        const char delicates[] = "Spin Mode: Delicates (600 RPM)\r\n";
+        printMessageLetterByLetter(serial, delicates, 100000);
+    } else {
+        const char silk[] = "Spin Mode: Silk (400 RPM)\r\n";
+        printMessageLetterByLetter(serial, silk, 100000);
+    }
+}
+
+void playStartDryingMelody(PwmOut& buzzer) {
+    int note_duration = 500000;  // 0.5 seconds per note
+    int notes[] = {262, 294, 330, 349};  // C4, D4, E4, F4 in Hz
+    int num_notes = sizeof(notes) / sizeof(int);
+
+    for (int i = 0; i < num_notes; ++i) {
+        buzzer.period(1.0 / notes[i]);
+        buzzer = 0.5;  // 50% duty cycle
+        wait_us(note_duration);
+        buzzer = 0.0;  // Turn off the buzzer
+        wait_us(100000);  // 0.1 seconds rest between notes
+    }
+}
+
+int encodeNumberTo7Segment(int num) {
+    // 7-segment display encoding for numbers 0-9 (assuming common-cathode display)
+    // Segment layout:
+    //      A
+    //    F   B
+    //      G
+    //    E   C
+    //      D   DP (decimal point)
+    switch (num) {
+        case 0: return 0x3F;  // 0b00111111 (segments A-F on)
+        case 1: return 0x06;  // 0b00000110 (segments B and C on)
+        case 2: return 0x5B;  // 0b01011011 (segments A, B, D, E, and G on)
+        case 3: return 0x4F;  // 0b01001111 (segments A, B, C, D, and G on)
+        case 4: return 0x66;  // 0b01100110 (segments B, C, F, and G on)
+        case 5: return 0x6D;  // 0b01101101 (segments A, C, D, F, and G on)
+        case 6: return 0x7D;  // 0b01111101 (segments A, C, D, E, F, and G on)
+        case 7: return 0x07;  // 0b00000111 (segments A, B, and C on)
+        case 8: return 0x7F;  // 0b01111111 (all segments on)
+        case 9: return 0x6F;  // 0b01101111 (segments A, B, C, D, F, and G on)
+        default: return 0x00;  // All segments off
+    }
+}
+
+void playReadyToCollectMelody(PwmOut& buzzer) {
+    int melody[] = {262, 294, 330, 349};  // C4, D4, E4, F4
+    float note_duration = 0.5;  // Each note lasts for half a second
+
+    for (int i = 0; i < sizeof(melody) / sizeof(int); i++) {
+        playBuzzerTone(buzzer, melody[i], note_duration);
+    }
+}
+
+float getTemperature() {
+    float sensorValue = TemperatureSensor.read();  // This should return a value between 0.0 and 1.0
+
+    // Map the sensor value to the temperature range
+    float temperature = sensorValue * 330;
+    return temperature;
+}
+    
+int main() {
+
+     // A flag to indicate whether the alarm is on or off
+    bool alarm_on = false;
+
+    // Timer to measure how long Switch1 is held down
+    Timer switch1_timer;
+    switch1_timer.start();
+
+    // Washing machine state
+    bool Machine_on = false;
+
+    // Washing cycle state
+    bool Washing_cycle_on = false;
+
+    // Eco boost mode state
+    bool Eco_boost_mode = false;
+
+    // track whether the potentiometer has been turned
+    bool potentiometer_turned = false;
+
+    // track the initial potentiometer value
+    float initial_potentiometer_value = 0.0;
+
+    // Temperature mode state
+    int current_temperature_mode = -1;
+
+    // Initialize display state as -1 (unknown state)
+    int display_state = -1;
+
+    // Previous 7-segment display state
+    int previous_display_state = 0;
+
+    // Spin mode state
+    int current_spin_mode = -1;
+
+    // Initialize to -1, indicating no mode is selected
+    bool first_adjustment = true;
+
+    // Washing cycle timer
+    Timer cycle_timer;
+
+    // Washing cycle end time
+    int cycle_end_time = 0;
+
+    // variables to track the last printed time
+    int last_printed_time = cycle_end_time;
+
+    // Initialize the start time of the cycle
+    int cycle_start_time = 0;
+    
+    // Initialize the detergent level to 0
+    int detergent_level = 0;
+
+    // Define the maximum operating temperature
+    float max_temperature = 300;
+
+    while (true) {
+        float currentTemperature = getTemperature();
+        if (currentTemperature > max_temperature) {
+            if (!alarm_on) {
+                // Start the alarm
+                Buzzer.period(1.0 / 440.0); // 440 Hz
+                Buzzer = 0.5; // 50% duty cycle, change this if you want the buzzer to be louder or quieter
+                printf("!!TEMPERATURE IS TOO HIGH TO OPERATE!!\n");
+                alarm_on = true;
+            }
+            // Make the LEDs and 7-segment display blink
+            RedLED = !RedLED;
+            GreenLED = !GreenLED;
+            MultiColourLED_Red = !MultiColourLED_Red;
+            MultiColourLED_Blue = !MultiColourLED_Blue;
+            Display = Display == 0 ? 0x3F : 0; // Toggle between all segments off and all segments on
+            ThisThread::sleep_for(500); // Wait for 0.5 second
+        } else if (alarm_on) {
+            // Stop the alarm
+            Buzzer = 0.0;
+            RedLED = GreenLED = MultiColourLED_Red = MultiColourLED_Blue = 0; // Turn off all the LEDs
+            Display = 0; // Turn off the 7-segment display
+            alarm_on = false;
+        }
+
+        if (Switch1) {
+            if (switch1_timer.read() >= 1.5) {
+                if (!Machine_on) {
+                    // Play booting up sound using the buzzer
+                    playBuzzerTone(Buzzer, 440, 0.1);
+                    playBuzzerTone(Buzzer, 880, 0.1);
+
+                    // Add the spinning circle pattern on the 7-segment display while the BlueLED is blinking
+                    for (int i = 0; i < 3; i++) {
+                        BlueLED = 1;
+                        for (int j = 0; j < 6; j++) {
+                            Display = (0x3F ^ (1 << (5 - j))); // Light all segments except one (the midlle one, to form a 'circcle' loading look)
+                            wait_us(350000 / 6);
+                        }
+                        BlueLED = 0;
+                        for (int j = 0; j < 6; j++) {
+                            Display = (0x3F ^ (1 << (5 - j))); // Light all segments except one (the midlle one, to form a 'circcle' loading look)
+                            wait_us(350000 / 6);
+                        }
+                    }
+                    // Turn on the Blue LED and show a constant pattern on the 7-segment display
+                    BlueLED = 1;
+                    Display = 0x3F; // Display a constant circle
+                    previous_display_state = Display; // Update the previous display state
+
+                    // Print message on the serial monitor letter by letter
+                    const char message_on[] = "Washing Machine is now on :)\r\n";
+                    printMessageLetterByLetter(pc, message_on, 100000);  // 100 ms delay between letters
+
+                    // Set the washing machine state to on
+                    Machine_on = true;
+
+                    // Setting the potentiometer value when the machine is turned on 
+                    initial_potentiometer_value = Potentiometer1.read();
+
+                } else {
+                    // Play shutting down sound using the buzzer
+                    playBuzzerTone(Buzzer, 880, 0.1);
+                    playBuzzerTone(Buzzer, 440, 0.1);
+                    
+                    // Add the spinning circle pattern on the 7-segment display while the BlueLED is blinking
+                    for (int i = 0; i < 4; i++) {
+                        BlueLED = 1;
+                        for (int j = 0; j < 6; j++) {
+                            Display = (0x3F ^ (1 << (5 - j))); // Light all segments except one
+                            wait_us(350000 / 6);
+                        }
+                        BlueLED = 0;
+                        for (int j = 0; j < 6; j++) {
+                            Display = (0x3F ^ (1 << (5 - j))); // Light all segments except one
+                            wait_us(350000 / 6);
+                        }
+                    }
+
+                    // Reset states and LEDs when the washing machine is turned off
+                    RedLED = 0;
+                    GreenLED = 0;
+                    BlueLED = 0;
+                    MultiColourLED_Red = 0;
+                    MultiColourLED_Blue = 0;
+                    
+                    // Turn off the 7-segment display when the washing machine is turned off
+                    Display = 0;
+
+                    // Print message on the serial monitor letter by letter
+                    const char message_off[] = "Washing Machine is now off ):\r\n";
+                    printMessageLetterByLetter(pc, message_off, 100000);  // 100 ms delay between letters
+
+                    // Reset states when the washing machine is turned off
+                    Machine_on = false;
+                    Washing_cycle_on = false;
+                    Eco_boost_mode = false;
+                }
+
+                // Reset the switch1_timer
+                switch1_timer.reset();
+            }
+        } else {
+            switch1_timer.reset();  // Reset the timer if Switch1 is released
+        }
+
+        if (Machine_on) {
+            if (!Washing_cycle_on) {
+            // Check the FSR value and update the detergent level
+            while (ForceSensitiveResistor.read() > 0.5 && detergent_level < 100) {  // The FSR is being pressed with a force/value stronger than 50% and the detergent level is below 100
+                detergent_level += 5;  // Increase the detergent level by 5
+                if (detergent_level > 100) {
+                    detergent_level = 100;  // Cap the detergent level at 100
+                }
+                printf("Detergent level: %d%%\r\n", detergent_level);  // Print the detergent level on the serial monitor
+                ThisThread::sleep_for(500);  // Wait for 0.5 second
+            }
+        }
+            if (Switch2) {
+                // Only start the cycle if a temperature mode and spin mode have been selected
+                if (current_temperature_mode != -1 && current_spin_mode != -1) {
+                    Washing_cycle_on = !Washing_cycle_on; // Toggle the washing cycle state
+
+                    if (Washing_cycle_on) {
+                        cycle_start_time = cycle_timer.read(); // Record the start time of the cycle
+                        // Print "Cycle started" message on the serial monitor letter by letter
+                        const char cycle_started[] = "Cycle started\r\n";
+                        printMessageLetterByLetter(pc, cycle_started, 100000);  // 100 ms delay between letters
+
+                        // Determine the duration of the cycle based on the temperature mode
+                        switch (current_temperature_mode) {
+                            case 0:
+                                cycle_end_time = 60;  // Hot mode
+                                break;
+                            case 1:
+                                cycle_end_time = 30;  // Warm mode
+                                break;
+                            case 2:
+                                cycle_end_time = 5;  // Cold mode
+                                break;
+                            default:
+                                cycle_end_time = 5;  // Default to cold mode
+                            }
+
+                        // Start the cycle timer
+                        cycle_timer.start();
+    
+                        // Print the initial time remaining
+                        printf("Time remaining: %d seconds\r\n", (int)cycle_end_time);
+
+                        // Play the melody
+                        playMelody(Buzzer);
+                    }
+                    else {
+                        // Print "Cycle stopped" message on the serial monitor letter by letter
+                        const char cycle_stopped[] = "Cycle stopped\r\n";
+                        printMessageLetterByLetter(pc, cycle_stopped, 100000);  // 100 ms delay between letters
+
+                        // Reset the cycle timer
+                        cycle_timer.reset();
+
+                        // Play the stop melody
+                        playStopMelody(Buzzer);
+
+                        // Make the 7-segment display blink once and then turn off
+                        Display = 0x3F;  // Display a constant circle
+                        ThisThread::sleep_for(500);
+                        Display = 0;     // Turn off the display
+                    }
+                } else {
+                    // Print a warning message on the serial monitor letter by letter
+                    const char warning[] = "Please select a temperature mode and spin mode before starting the cycle\r\n";
+                    printMessageLetterByLetter(pc, warning, 50000);  // 50 ms delay between letters
+                }
+                while(Switch2); // Wait for the button to be released
+            }
+
+            RedLED = Washing_cycle_on; // Keep the Red LED on if the washing cycle is on
+
+            // Toggle Eco boost mode when Switch3 is pressed
+            if (Switch3) {
+                if (!Washing_cycle_on) { // Add this line
+                    Eco_boost_mode = !Eco_boost_mode; // Toggle the Eco boost mode state
+                    while(Switch3); // Wait for the button to be released
+
+                    if (Eco_boost_mode) {
+                        // Print "Eco boost on" message on the serial monitor letter by letter
+                        const char eco_boost_on[] = "Eco boost on, you are now using 30% less power!\r\n";
+                        printMessageLetterByLetter(pc, eco_boost_on, 100000);  // 100 ms delay between letters
+                    } else {
+                        // Print "Eco boost off" message on the serial monitor letter by letter
+                        const char eco_boost_off[] = "Eco boost off\r\n";
+                        printMessageLetterByLetter(pc, eco_boost_off, 100000);  // 100 ms delay between letters
+                    }
+                }
+            }
+
+            GreenLED = Eco_boost_mode; // Keep the Red LED on if the Eco boost mode is on
+
+            // Check the potentiometer value and update the temperature mode
+            float current_pot_value = Potentiometer1.read();
+            int new_temperature_mode = getCurrentTemperatureMode(current_pot_value);
+
+            if (!potentiometer_turned && abs(current_pot_value - initial_potentiometer_value) > 0.05) {
+                potentiometer_turned = true;
+            }
+
+            if (potentiometer_turned && !Washing_cycle_on) { // Add !Washing_cycle_on condition here
+                if (new_temperature_mode != current_temperature_mode) {
+                    playBuzzerTone(Buzzer, 440, 0.1); // Play a tone with the buzzer each time we get to a new temperature mode
+                    current_temperature_mode = new_temperature_mode;
+                    printTemperatureMode(pc, current_temperature_mode, previous_display_state);
+                }
+            }
+
+            // Check the second potentiometer value and update the spin mode
+            float current_pot2_value = Potentiometer2.read();
+            int new_spin_mode = getCurrentSpinMode(current_pot2_value);
+            if (new_spin_mode != current_spin_mode && !Washing_cycle_on) { // Add !Washing_cycle_on condition here
+                if (first_adjustment && new_spin_mode == 4) {
+                    // Do nothing if the potentiometer hasn't been adjusted yet
+                    first_adjustment = false;
+                } else {
+                    playBuzzerTone(Buzzer, 440, 0.1); // Play a tone with the buzzer each time we get to a new spin mode
+                    current_spin_mode = new_spin_mode;
+                    printSpinMode(pc, current_spin_mode);
+                }
+            }
+
+            // Update the 7-segment display
+            updateSegmentDisplay(Display, Washing_cycle_on, display_state);
+
+            if (Washing_cycle_on) {
+                // Sync the 7-segment display with the buzzer
+                for (int j = 0; j < 6; j++) {
+                    Display = (0x3F ^ (1 << (5 - j))); // Light all segments except one
+                    Buzzer.period(1.0 / 200.0);
+                    Buzzer = 0.1; // 10% duty cycle
+                    wait_us(350000 / 6);
+                    Buzzer = 0.0; // Turn off the buzzer
+                }
+
+            // Check if the washing cycle should end
+            if (cycle_timer.read() >= cycle_end_time) {
+                Washing_cycle_on = false;  // Stop the washing cycle
+
+                // Print "Cycle ended" message on the serial monitor letter by letter
+                const char cycle_ended[] = "Cycle ended\r\n";
+                printMessageLetterByLetter(pc, cycle_ended, 100000);  // 100 ms delay between letters
+
+                playStopMelody(Buzzer);
+
+                // set the multicolor LED to pink (full red, some green, some blue)
+                MultiColourLED_Red = 1;
+                MultiColourLED_Blue = 1;
+
+                // Wait for the LDR value to exceed the threshold
+                while (LightDependentResistor.read() < 0.80) { // LDR has a value more than 80%
+                    ThisThread::sleep_for(100);  // wait for a short while before the next check
+                }
+
+                // Play a sound to signal the start of the drying cycle
+                playStartDryingMelody(Buzzer);
+
+                // Start the drying cycle
+                Timer drying_timer;
+                drying_timer.start();
+                const int drying_end_time = 10;  // 10 seconds
+                int last_printed_drying_time = drying_end_time + 1;  // Initialize to a value larger than drying_end_time
+                while (drying_timer.read() < drying_end_time) {
+                    int drying_time_remaining = drying_end_time - drying_timer.read();
+                    // Only print the time remaining if it's different from the last printed time
+                    if (drying_time_remaining != last_printed_drying_time) {
+                        printf("Drying time remaining: %d seconds\r\n", drying_time_remaining);
+                        last_printed_drying_time = drying_time_remaining;
+                    }
+
+                    // Update the 7-segment display with the remaining drying time
+                    Display = encodeNumberTo7Segment(drying_time_remaining);  // assuming this function exists and works correctly
+                    ThisThread::sleep_for(1000);  // wait for a second
+                }
+
+                // Turn off the multi-color LED after the drying cycle ends
+                MultiColourLED_Red = 0;
+                MultiColourLED_Blue = 0;
+
+                Display = 0x3F;  // Display a constant circle
+                ThisThread::sleep_for(500);
+                Display = 0;     // Turn off the display
+
+                // Print "Clothes are ready" message on the serial monitor letter by letter
+                const char clothes_ready[] = "CLOTHES ARE READY!!\r\n";
+                printMessageLetterByLetter(pc, clothes_ready, 100000);  // 100 ms delay between letters
+
+                // Play the "ready to collect" melody
+                playReadyToCollectMelody(Buzzer);
+
+                // Check and print out the final detergent level
+                printf("Final detergent level: %d%%\r\n", detergent_level);
+
+                // Print message depending on the detergent level
+                if (detergent_level >= 50) {
+                    const char fresh_clothes_message[] = "WOW FRESH CLOTHES!\r\n";
+                    printMessageLetterByLetter(pc, fresh_clothes_message, 100000);  // 100 ms delay between letters
+                } else {
+                    const char stinky_clothes_message[] = "EW STINKY CLOTHES!\r\n";
+                    printMessageLetterByLetter(pc, stinky_clothes_message, 100000);  // 100 ms delay between letters
+                }
+
+                cycle_timer.reset();
+            }
+            else {
+                int time_remaining = cycle_end_time - (cycle_timer.read() - cycle_start_time);
+                if (time_remaining != last_printed_time) {
+                    printf("Time remaining: %d seconds\r\n", time_remaining);
+                    last_printed_time = time_remaining;
+                }
+            }
+        }
+    }
+}
+}
